@@ -3,6 +3,7 @@ package ack
 import (
 	"errors"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -13,17 +14,13 @@ var (
 type AckManager struct {
 	capacity int
 	records  []*recorder
+	canAck   CanAck
 
 	async  bool
 	setCh  chan *msg
 	ackCh  chan *msg
 	stopCh chan struct{}
 	status int32
-}
-
-type msg struct {
-	Uid  int64
-	Time int64
 }
 
 func NewAckManager(cfg *Config) (*AckManager, error) {
@@ -55,9 +52,9 @@ func (a *AckManager) Start() {
 	go func() {
 		select {
 		case m := <-a.setCh:
-			a.set(m.Uid, m.Time)
+			a.set(m.ID, m.Flag, m.Value)
 		case m := <-a.ackCh:
-			a.ack(m.Uid, m.Time)
+			a.ack(m.ID, m.Flag)
 		case <-a.stopCh:
 			return
 		}
@@ -71,11 +68,13 @@ func (a *AckManager) Stop() {
 	close(a.stopCh)
 }
 
-func (a *AckManager) Set(uid, time int64) error {
+func (a *AckManager) Set(id int64, flag, val interface{}) error {
 	if a.async {
 		m := &msg{
-			Uid:  uid,
-			Time: time,
+			ID:    id,
+			Time:  time.Now().UnixNano(),
+			Flag:  flag,
+			Value: val,
 		}
 		select {
 		case a.setCh <- m:
@@ -85,20 +84,20 @@ func (a *AckManager) Set(uid, time int64) error {
 		}
 	}
 
-	a.set(uid, time)
+	a.set(id, flag, val)
 	return nil
 }
 
-func (a *AckManager) set(uid, time int64) {
-	index := uid % int64(a.capacity)
-	a.records[index].Set(uid, time)
+func (a *AckManager) set(id int64, flag, val interface{}) {
+	index := id % int64(a.capacity)
+	a.records[index].Set(id, flag, val)
 }
 
-func (a *AckManager) Ack(uid, time int64) error {
+func (a *AckManager) Ack(id int64, flag interface{}) error {
 	if a.async {
 		m := &msg{
-			Uid:  uid,
-			Time: time,
+			ID:   id,
+			Flag: flag,
 		}
 		select {
 		case a.ackCh <- m:
@@ -108,17 +107,17 @@ func (a *AckManager) Ack(uid, time int64) error {
 		}
 	}
 
-	a.ack(uid, time)
+	a.ack(id, flag)
 	return nil
 }
 
-func (a *AckManager) ack(uid, time int64) {
-	index := uid % int64(a.capacity)
-	a.records[index].Remove(uid, time)
+func (a *AckManager) ack(id int64, flag interface{}) {
+	index := id % int64(a.capacity)
+	a.records[index].Remove(id, flag)
 }
 
-func (a *AckManager) Get(duration int64) []int64 {
-	var res []int64
+func (a *AckManager) Get(duration int64) []*msg {
+	var res []*msg
 	for _, r := range a.records {
 		res = append(res, r.Get(duration)...)
 	}

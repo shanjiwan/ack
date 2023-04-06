@@ -8,44 +8,51 @@ import (
 // recorder records messages
 type recorder struct {
 	sync.RWMutex
-	msgs map[int64]int64 // uid => timestamp
+	msgs map[int64]*msg // msgID => msg
+	am   *AckManager
 }
 
 func newRecorder() *recorder {
 	return &recorder{
-		msgs: map[int64]int64{},
+		msgs: map[int64]*msg{},
 	}
 }
 
 // Set uid and timestamp
-func (r *recorder) Set(uid, time int64) {
+func (r *recorder) Set(id int64, flag, val interface{}) {
 	r.Lock()
-	r.msgs[uid] = time
+	m := &msg{
+		ID:    id,
+		Time:  time.Now().UnixNano(),
+		Flag:  flag,
+		Value: val,
+	}
+	r.msgs[id] = m
 	r.Unlock()
 }
 
 // Remove uid if timestamp older than the record one
-func (r *recorder) Remove(uid, time int64) {
+func (r *recorder) Remove(id int64, flag interface{}) {
 	r.Lock()
-	t, ok := r.msgs[uid]
-	if ok && t <= time {
-		delete(r.msgs, uid)
+	m, ok := r.msgs[id]
+	if ok && r.am.canAck(m.Flag, flag) {
+		delete(r.msgs, id)
 	}
 	r.Unlock()
 }
 
 // Get uid list have not removed after duration
-func (r *recorder) Get(duration int64) []int64 {
+func (r *recorder) Get(duration int64) []*msg {
 	if duration <= 0 {
-		return []int64{}
+		return []*msg{}
 	}
 
-	res := make([]int64, 0)
+	res := make([]*msg, 0)
 	now := time.Now().UnixNano()
 	r.RLock()
-	for u, t := range r.msgs {
-		if now-t >= duration {
-			res = append(res, u)
+	for _, m := range r.msgs {
+		if now-m.Time >= duration {
+			res = append(res, m)
 		}
 	}
 	r.RUnlock()
@@ -54,7 +61,7 @@ func (r *recorder) Get(duration int64) []int64 {
 
 // ReAllocate to release the msgs memory
 func (r *recorder) ReAllocate() {
-	newMsgs := make(map[int64]int64, len(r.msgs))
+	newMsgs := make(map[int64]*msg, len(r.msgs))
 	r.Lock()
 	for k, v := range r.msgs {
 		newMsgs[k] = v
