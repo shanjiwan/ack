@@ -26,6 +26,18 @@ type Config struct {
 	AckBufferSize int64
 	// CanAck is an optional config cooperating with flag arg of Set() and Ack(). It is used in
 	// some special situations.
+	// For example, we need to send user state to another progress and user state only have one field
+	// wallet balance. Uid is chosen as message id. Two messages was sent. First is {id:123, balance:100.00},
+	// second is {id:123, balance:120.00}.We only concern the second message because if the second messages
+	// is arrived, the user state is synced even if the first is lost.
+	// In this situation, we can only record and ack the newest message. So we can use timestamp as flag to
+	// identify if messages are newest. CanAck is like below:
+	// func canAck(setFlag, ackFlag interface{}) bool {
+	//		setT := setFlag.(int64)
+	//      ackT := ackFlag.(int64)
+	//      return setT <= ackT
+	// }
+	// When response of first msg arrived, it won't be acked since it not the newest.
 	CanAck CanAck
 }
 
