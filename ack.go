@@ -11,11 +11,32 @@ var (
 	ErrMsgAckFailed    = errors.New("the buffer is full, asynchronously ack msg failed")
 )
 
+type Config struct {
+	// segment lock is used to increase concurrency. Record messages are hashed to different
+	// segments by message id. Capacity is the number of segments ack manager used. It must
+	// be bigger than 0.
+	Capacity int
+	// Ack manager provide two working modes: sync mode\async mode. Sync mode is the default one.
+	// When working in async mode, messages set or ack are sent to a buffer and asynchronously
+	// processed. Messages set or ack will be aborted and return error when the buffer is full.
+	Async bool
+	// SetBufferSize and AckBufferSize is the number of messages can be buffered. It only works in
+	// Async mode.
+	SetBufferSize int64
+	AckBufferSize int64
+	// CanAck is an optional config cooperating with flag arg of Set() and Ack(). It is used in
+	// some special situations.
+	CanAck CanAck
+}
+
+type CanAck func(setFlag, ackFlag interface{}) bool
+
 type AckManager struct {
 	capacity int
 	records  []*recorder
 	canAck   CanAck
 
+	// used for async mode
 	async  bool
 	setCh  chan *msg
 	ackCh  chan *msg
@@ -32,17 +53,18 @@ func NewAckManager(cfg *Config) (*AckManager, error) {
 		records:  make([]*recorder, 0, cfg.Capacity),
 	}
 	for i := 0; i < cfg.Capacity; i++ {
-		am.records = append(am.records, newRecorder())
+		am.records = append(am.records, newRecorder(am))
 	}
 
 	if cfg.Async {
 		am.async = true
-		am.setCh = make(chan *msg, 1024)
-		am.ackCh = make(chan *msg, 1024)
+		am.setCh = make(chan *msg, cfg.SetBufferSize)
+		am.ackCh = make(chan *msg, cfg.AckBufferSize)
 	}
 	return am, nil
 }
 
+// Start starts daemon goroutine in async mode.
 func (a *AckManager) Start() {
 	if !a.async || !atomic.CompareAndSwapInt32(&a.status, 0, 1) {
 		return
@@ -61,6 +83,7 @@ func (a *AckManager) Start() {
 	}()
 }
 
+// Stop stops daemon goroutine in async mode.
 func (a *AckManager) Stop() {
 	if !a.async || !atomic.CompareAndSwapInt32(&a.status, 1, 0) {
 		return
@@ -71,10 +94,10 @@ func (a *AckManager) Stop() {
 func (a *AckManager) Set(id int64, flag, val interface{}) error {
 	if a.async {
 		m := &msg{
-			ID:    id,
-			Time:  time.Now().UnixNano(),
-			Flag:  flag,
-			Value: val,
+			ID:        id,
+			Timestamp: time.Now().UnixNano(),
+			Flag:      flag,
+			Value:     val,
 		}
 		select {
 		case a.setCh <- m:
