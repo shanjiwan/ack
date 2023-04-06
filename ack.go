@@ -11,7 +11,7 @@ var (
 	ErrMsgAckFailed    = errors.New("the buffer is full, asynchronously ack msg failed")
 )
 
-type Config struct {
+type Config[flag any] struct {
 	// segment lock is used to increase concurrency. Record messages are hashed to different
 	// segments by message id. Capacity is the number of segments ack manager used. It must
 	// be bigger than 0.
@@ -38,46 +38,47 @@ type Config struct {
 	//      return setT <= ackT
 	// }
 	// When response of first msg arrived, it won't be acked since it not the newest.
-	CanAck CanAck
+	CanAck CanAck[flag]
 }
 
-type CanAck func(setFlag, ackFlag interface{}) bool
+type CanAck[flag any] func(setFlag, ackFlag flag) bool
 
-type AckManager struct {
+type AckManager[flag, val any] struct {
 	capacity int
-	records  []*recorder
-	canAck   CanAck
+	records  []*recorder[flag, val]
+	canAck   CanAck[flag]
 
 	// used for async mode
 	async  bool
-	setCh  chan *msg
-	ackCh  chan *msg
+	setCh  chan *msg[flag, val]
+	ackCh  chan *msg[flag, val]
 	stopCh chan struct{}
 	status int32
 }
 
-func NewAckManager(cfg *Config) (*AckManager, error) {
+func NewAckManager[flag, val any](cfg *Config[flag]) (*AckManager[flag, val], error) {
 	if cfg.Capacity <= 0 {
 		return nil, errors.New("capacity should be more than 0")
 	}
-	am := &AckManager{
+	am := &AckManager[flag, val]{
 		capacity: cfg.Capacity,
-		records:  make([]*recorder, 0, cfg.Capacity),
+		records:  make([]*recorder[flag, val], 0, cfg.Capacity),
+		canAck:   cfg.CanAck,
 	}
 	for i := 0; i < cfg.Capacity; i++ {
-		am.records = append(am.records, newRecorder(am))
+		am.records = append(am.records, newRecorder[flag, val](am))
 	}
 
 	if cfg.Async {
 		am.async = true
-		am.setCh = make(chan *msg, cfg.SetBufferSize)
-		am.ackCh = make(chan *msg, cfg.AckBufferSize)
+		am.setCh = make(chan *msg[flag, val], cfg.SetBufferSize)
+		am.ackCh = make(chan *msg[flag, val], cfg.AckBufferSize)
 	}
 	return am, nil
 }
 
 // Start starts daemon goroutine in async mode.
-func (a *AckManager) Start() {
+func (a *AckManager[flag, val]) Start() {
 	if !a.async || !atomic.CompareAndSwapInt32(&a.status, 0, 1) {
 		return
 	}
@@ -96,20 +97,20 @@ func (a *AckManager) Start() {
 }
 
 // Stop stops daemon goroutine in async mode.
-func (a *AckManager) Stop() {
+func (a *AckManager[flag, val]) Stop() {
 	if !a.async || !atomic.CompareAndSwapInt32(&a.status, 1, 0) {
 		return
 	}
 	close(a.stopCh)
 }
 
-func (a *AckManager) Set(id int64, flag, val interface{}) error {
+func (a *AckManager[flag, val]) Set(id int64, f flag, v val) error {
 	if a.async {
-		m := &msg{
+		m := &msg[flag, val]{
 			ID:        id,
 			Timestamp: time.Now().UnixNano(),
-			Flag:      flag,
-			Value:     val,
+			Flag:      f,
+			Value:     v,
 		}
 		select {
 		case a.setCh <- m:
@@ -119,20 +120,20 @@ func (a *AckManager) Set(id int64, flag, val interface{}) error {
 		}
 	}
 
-	a.set(id, flag, val)
+	a.set(id, f, v)
 	return nil
 }
 
-func (a *AckManager) set(id int64, flag, val interface{}) {
+func (a *AckManager[flag, val]) set(id int64, f flag, v val) {
 	index := id % int64(a.capacity)
-	a.records[index].Set(id, flag, val)
+	a.records[index].Set(id, f, v)
 }
 
-func (a *AckManager) Ack(id int64, flag interface{}) error {
+func (a *AckManager[flag, val]) Ack(id int64, f flag) error {
 	if a.async {
-		m := &msg{
+		m := &msg[flag, val]{
 			ID:   id,
-			Flag: flag,
+			Flag: f,
 		}
 		select {
 		case a.ackCh <- m:
@@ -142,24 +143,24 @@ func (a *AckManager) Ack(id int64, flag interface{}) error {
 		}
 	}
 
-	a.ack(id, flag)
+	a.ack(id, f)
 	return nil
 }
 
-func (a *AckManager) ack(id int64, flag interface{}) {
+func (a *AckManager[flag, val]) ack(id int64, f flag) {
 	index := id % int64(a.capacity)
-	a.records[index].Remove(id, flag)
+	a.records[index].Remove(id, f)
 }
 
-func (a *AckManager) Get(duration int64) []*msg {
-	var res []*msg
+func (a *AckManager[flag, val]) Get(duration int64) []*msg[flag, val] {
+	var res []*msg[flag, val]
 	for _, r := range a.records {
 		res = append(res, r.Get(duration)...)
 	}
 	return res
 }
 
-func (a *AckManager) ReAllocate() {
+func (a *AckManager[flag, val]) ReAllocate() {
 	for _, v := range a.records {
 		v.ReAllocate()
 	}
